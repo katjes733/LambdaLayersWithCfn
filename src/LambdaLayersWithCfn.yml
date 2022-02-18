@@ -30,12 +30,12 @@ Parameters:
   ResourcePrefix:
     Description: The prefix for all resources
     Type: String
-    Default: 'w-pasx-'
+    Default: ''
     AllowedPattern: ^$|^[a-z0-9-]{0,7}$
   ArtifactBucketName:
     Description: Layer Artifact Bucket Name
     Type: String
-    Default: layer-artifacts
+    Default: 'layer-artifacts'
 
 # -----------------------------------------------------------------------------
 # Conditions

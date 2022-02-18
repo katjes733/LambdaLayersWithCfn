@@ -1,0 +1,529 @@
+# MIT License
+# 
+# Copyright (c) 2022 Martin Macecek
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+AWSTemplateFormatVersion: 2010-09-09
+Description: Lambda Layers with CloudFormation Demonstration
+
+# -----------------------------------------------------------------------------
+# Parameters
+# -----------------------------------------------------------------------------
+Parameters:
+  ResourcePrefix:
+    Description: The prefix for all resources
+    Type: String
+    Default: ''
+    AllowedPattern: ^$|^[a-z0-9-]{0,7}$
+  ArtifactBucketName:
+    Description: Layer Artifact Bucket Name
+    Type: String
+    Default: 'layer-artifacts'
+
+# -----------------------------------------------------------------------------
+# Conditions
+# -----------------------------------------------------------------------------
+Conditions:
+  IsArmSupportedRegion: !Or [!Equals ['us-east-1', !Ref AWS::Region], !Equals ['us-west-2', !Ref AWS::Region], !Equals ['eu-central-1', !Ref AWS::Region], !Equals ['eu-west-1', !Ref AWS::Region], !Equals ['ap-south-1', !Ref AWS::Region], !Equals ['ap-southeast-1', !Ref AWS::Region], !Equals ['ap-southeast-2', !Ref AWS::Region], !Equals ['ap-northeast-1', !Ref AWS::Region]]
+# -----------------------------------------------------------------------------
+# Mappings
+# -----------------------------------------------------------------------------
+Mappings:
+  # First line must be indented by 8, every line following with 14.
+  # This is due to the code being inserted into the buildspec.yml with 6 indents  
+  Code:
+    Python:      
+      Requirements: |
+        pyjwt[crypto]
+
+# -----------------------------------------------------------------------------
+# Resources
+# -----------------------------------------------------------------------------
+Resources:
+  KmsKey:
+    Type: AWS::KMS::Key
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: F76
+            reason: "False Positive - because we are using a Condition"
+    Properties:
+      Description: Used by Assumed Roles in Encrypt/Decrypt code
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: 2012-10-17
+        Id: !Ref AWS::StackName
+        Statement:
+          - Sid: Allows admin of the key
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: '*'
+          - Sid: Allow use of key in lambda
+            Effect: Allow
+            Principal:
+              Service: [lambda.amazonaws.com] 
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: '*'
+          - Sid: !Sub  "Allow use of the key for ${AWS::AccountId}"
+            Effect: "Allow"
+            Principal: 
+              AWS: "*"
+            Action: 
+              - "kms:Encrypt"
+              - "kms:Decrypt"
+              - "kms:ReEncrypt*"
+              - "kms:GenerateDataKey*"
+              - "kms:DescribeKey"
+            Resource: "*"
+            Condition:
+              StringLike:
+                kms:CallerAccount: !Sub ${AWS::AccountId}
+
+  KmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${ResourcePrefix}${ArtifactBucketName}-${AWS::AccountId}-${AWS::Region}'
+      TargetKeyId: !Ref KmsKey
+
+  # -----------------------------------------------------------------------------
+  # Lambda to empty buckets
+  # -----------------------------------------------------------------------------
+  EmptyBucketRole:
+    Type: 'AWS::IAM::Role'
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: "Replacement not necessary"
+    Properties:
+      RoleName: !Sub '${ResourcePrefix}EmptyBucketRole-${AWS::Region}'
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+        Version: 2012-10-17
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+  EmptyBucketRolePolicy:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyName: !Sub '${ResourcePrefix}EmptyBucketRolePolicy-${AWS::Region}'
+      PolicyDocument:        
+        Statement:    
+          - Action:
+              - 's3:Delete*'
+              - 's3:Get*'
+              - 's3:List*'
+            Effect: Allow
+            Resource:
+              - 'arn:aws:s3:::*'
+              - 'arn:aws:s3:::*/*'
+        Version: 2012-10-17      
+      Roles:
+        - !Ref EmptyBucketRole
+  EmptyBucketLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W84
+            reason: "No critical data in logs"
+    Properties:
+      RetentionInDays: 1
+      LogGroupName: !Sub '/aws/lambda/${ResourcePrefix}EmptyBucket'
+  EmptyBucket:
+    Type: AWS::Lambda::Function
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks:
+            - E3002
+      cfn_nag:
+        rules_to_suppress:
+          - id: W58
+            reason: "Provided by managed policy AWSLambdaBasicExecutionRole in EmptyBucketRole"
+          - id: W89
+            reason: "No need for VPC here"
+          - id: W92
+            reason: "No concurrency needed"
+    DependsOn: 
+      - EmptyBucketLogGroup
+      - EmptyBucketRolePolicy
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}EmptyBucket'
+      Architectures: 
+        - !If 
+          - IsArmSupportedRegion
+          - arm64
+          - x86_64
+      Code: 
+        ZipFile: |
+          import json, boto3, logging, time
+          import cfnresponse
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+              logger.info("event: {}".format(event))
+              try:
+                  bucket = event['ResourceProperties']['BucketName']
+                  logger.info("bucket: {}, event['RequestType']: {}".format(bucket,event['RequestType']))
+                  if event['RequestType'] == 'Delete':
+                      s3 = boto3.resource('s3')
+                      bucket = s3.Bucket(bucket)
+                      time.sleep(60)
+                      bucket.objects.all().delete()
+                      bucket.object_versions.all().delete()
+
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, event['LogicalResourceId'])
+              except Exception as e:
+                  logger.info("Exception: {}".format(e))
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {}, event['LogicalResourceId'], reason=str(e))
+
+      Handler: "index.lambda_handler"
+      Runtime: python3.9
+      MemorySize: 128
+      Timeout: 600
+      Role: !GetAtt EmptyBucketRole.Arn
+
+  # -----------------------------------------------------------------------------
+  # Bucket for lambda layer related artifacts
+  # -----------------------------------------------------------------------------
+  LambdaLayerArtifactBucket:
+    Type: AWS::S3::Bucket
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W35
+            reason: "No access logging necessary"
+          - id: W51
+            reason: "No bucket policy necessary for local access only"
+    DependsOn: EmptyBucket
+    Properties:
+      BucketName: !Sub '${ResourcePrefix}${ArtifactBucketName}-${AWS::AccountId}-${AWS::Region}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: aws:kms
+            KMSMasterKeyID: !GetAtt KmsKey.Arn
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+        - Id: Put everything into STANDARD_IA after 90 days
+          Transitions:
+          - StorageClass: STANDARD_IA
+            TransitionInDays: 90
+          Status: Enabled  
+
+  EmptyLayerArtifactBucket:  
+    Type: Custom::EmptyLayerArtifactBucket
+    Properties:
+      ServiceToken: !Sub '${EmptyBucket.Arn}'
+      BucketName: !Ref LambdaLayerArtifactBucket
+
+  # -----------------------------------------------------------------------------
+  # CodeBuild Project resources to build the lambda layer zip file
+  # -----------------------------------------------------------------------------
+  LambdaLayerCodeBuildProjectRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: "Complies with Coding Guidelines"
+    Properties:
+      RoleName: !Sub '${ResourcePrefix}LambdaLayerCodeBuildProjectRole-${AWS::Region}'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal: 
+              Service: codebuild.amazonaws.com
+      Path: /
+
+  LambdaLayerCodeBuildProjectRolePolicy:
+    Type: AWS::IAM::Policy
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: F4
+            reason: "Complies with Coding Guidelines"
+          - id: W12
+            reason: "Complies with Coding Guidelines"
+    Properties:
+      PolicyName: !Sub '${ResourcePrefix}LambdaLayerCodeBuildProjectRolePolicy-${AWS::Region}'
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetBucketPolicy
+              - s3:GetObject
+              - s3:ListBucket
+            Resource:
+              - !Sub '${LambdaLayerArtifactBucket.Arn}'
+              - !Sub '${LambdaLayerArtifactBucket.Arn}/*'
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              - logs:DescribeLogGroups
+            Resource: arn:aws:logs:*:*:*
+          - Effect: Allow
+            Action:
+              - codebuild:CreateReportGroup
+              - codebuild:CreateReport
+              - codebuild:UpdateReport
+              - codebuild:BatchPutTestCases
+              - codebuild:BatchPutCodeCoverages
+            Resource: !Sub 'arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:report-group/*'
+          - Effect: Allow
+            Action:
+              - cloudformation:SignalResource
+            Resource: !Sub '${AWS::StackId}'
+      Roles:
+        - !Ref LambdaLayerCodeBuildProjectRole
+
+  LambdaLayerCodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    DependsOn: LambdaLayerCodeBuildProjectRolePolicy
+    Properties:
+      Name: !Sub '${ResourcePrefix}LambdaLayer'
+      Cache:
+        Type: S3
+        Location: !Sub '${ResourcePrefix}${ArtifactBucketName}-${AWS::AccountId}-${AWS::Region}'
+      Description: Build project to prepare the CFN template configuration
+      EncryptionKey: !GetAtt KmsKey.Arn
+      ServiceRole: !GetAtt LambdaLayerCodeBuildProjectRole.Arn
+      Artifacts:
+        Location: !Sub '${ResourcePrefix}${ArtifactBucketName}-${AWS::AccountId}-${AWS::Region}'
+        Name: jwt.zip
+        Packaging: ZIP
+        Path: layers
+        Type: S3
+      Environment:
+        Type:        LINUX_CONTAINER
+        Image:       aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        ComputeType: BUILD_GENERAL1_SMALL
+        EnvironmentVariables:
+          - Name: STACK_NAME
+            Type: PLAINTEXT
+            Value: none
+          - Name: LOGICAL_RESOURCE_ID
+            Type: PLAINTEXT
+            Value: none
+          - Name: TARGET_ARTIFACT_BUCKET
+            Type: PLAINTEXT
+            Value: !Ref LambdaLayerArtifactBucket
+          - Name: KMS_KEY_ARN
+            Type: PLAINTEXT
+            Value: !GetAtt KmsKey.Arn
+      Source:
+        Type: NO_SOURCE
+        BuildSpec: !Sub 
+          - |
+            version: 0.2
+            phases:
+              install:
+                runtime-versions:
+                  python: 3.9
+              build:
+                commands: |
+                  cat <<EOT >> requirements.txt
+                  ${Requirements}
+                  EOT
+                  echo Create target folder
+                  mkdir -p "python"
+                  echo Install requirements.txt
+                  python -m pip install -r requirements.txt -t "python"
+                  echo Getting required git repo
+                  git clone https://github.com/OfficeDev/outlook-actionable-messages-python-token-validation.git jwtvalidation
+                  echo Copy specific files to folder python
+                  cp ./jwtvalidation/openid.py ./python
+              post_build:
+                commands: |                 
+                  echo Build completed on `date`
+                  TIMESTAMP=$(date +%s%N)
+                  if [[ "$STACK_NAME" != "none" ]]; then
+                    STATUS_TEXT="SUCCESS"
+                    if [[ "$CODEBUILD_BUILD_SUCCEEDING" == "0" ]]; then
+                      STATUS_TEXT="FAILURE"
+                    fi
+                    echo "Sending $STATUS_TEXT signal to CloudFormation Stack $STACK_NAME wait condition $LOGICAL_RESOURCE_ID to continue"
+                    aws cloudformation signal-resource --stack-name $STACK_NAME --logical-resource-id $LOGICAL_RESOURCE_ID --unique-id $TIMESTAMP --status $STATUS_TEXT
+                  else 
+                    echo "Not called from CloudFormation" 
+                  fi
+            artifacts:
+              files:
+                - 'python/**/*'
+              discard-paths: no
+          - Requirements: !FindInMap [ Code, Python, Requirements ] 
+      TimeoutInMinutes: 5
+
+  # -----------------------------------------------------------------------------
+  # Lambda to start a CodeBuild project
+  # -----------------------------------------------------------------------------
+  StartCodeBuildRole:
+    Type: 'AWS::IAM::Role'
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: "Replacement not necessary"
+    Properties:
+      RoleName: !Sub '${ResourcePrefix}StartCodeBuildRole-${AWS::Region}'
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+        Version: 2012-10-17
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+  StartCodeBuildRolePolicy:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyName: !Sub '${ResourcePrefix}StartCodeBuildRolePolicy-${AWS::Region}'
+      PolicyDocument:        
+        Statement:    
+          - Action:
+              - 'codebuild:StartBuild'
+            Effect: Allow
+            Resource: !GetAtt LambdaLayerCodeBuildProject.Arn
+        Version: 2012-10-17      
+      Roles:
+        - !Ref StartCodeBuildRole
+  StartCodeBuildLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W84
+            reason: "No critical data in logs"
+    Properties:
+      RetentionInDays: 1
+      LogGroupName: !Sub '/aws/lambda/${ResourcePrefix}StartCodeBuild'
+  StartCodeBuild:
+    Type: AWS::Lambda::Function
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks:
+            - E3002
+      cfn_nag:
+        rules_to_suppress:
+          - id: W58
+            reason: "Provided by managed policy AWSLambdaBasicExecutionRole in StartCodeBuildRole"
+          - id: W89
+            reason: "No need for VPC here"
+          - id: W92
+            reason: "No concurrency needed"
+    DependsOn: 
+      - StartCodeBuildLogGroup
+      - StartCodeBuildRolePolicy
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}StartCodeBuild'
+      Architectures: 
+        - !If 
+          - IsArmSupportedRegion
+          - arm64
+          - x86_64
+      Code: 
+        ZipFile: |
+          import json, boto3, logging, time
+          import cfnresponse
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+              logger.info("event: {}".format(event))
+              try:
+                  projectName = event['ResourceProperties']['ProjectName']
+                  stackId = event['StackId']
+                  logicalResourceId = event['ResourceProperties']['WaitConditionLogicalResourceId']
+                  logger.info(f"projectName: {projectName}, stackId: {stackId}, logicalResourceId: {logicalResourceId}")
+                  if event['RequestType'] != 'Delete':
+                      logger.info(f"Starting CodeBuild project {projectName}...")
+                      client = boto3.client('codebuild')
+                      client.start_build(projectName=projectName, environmentVariablesOverride=[{'name': 'STACK_NAME', 'value': stackId, 'type': 'PLAINTEXT'}, {'name': 'LOGICAL_RESOURCE_ID', 'value': logicalResourceId, 'type': 'PLAINTEXT'}])
+
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, event['LogicalResourceId'])
+              except Exception as e:
+                  logger.error(f"Exception: {e}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {}, event['LogicalResourceId'], reason=str(e))
+
+      Handler: "index.lambda_handler"
+      Runtime: python3.9
+      MemorySize: 128
+      Timeout: 60
+      Role: !GetAtt StartCodeBuildRole.Arn
+
+  StartLambdaLayerCodeBuild:  
+    Type: Custom::StartLambdaLayerCodeBuild
+    Properties:
+      ServiceToken: !Sub '${StartCodeBuild.Arn}'
+      ProjectName: !Ref LambdaLayerCodeBuildProject
+      WaitConditionLogicalResourceId: 'WaitForLambdaLayerCodeBuild'
+
+  WaitForLambdaLayerCodeBuild:
+    Type: AWS::CloudFormation::WaitCondition
+    DependsOn: StartLambdaLayerCodeBuild
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT5M
+        Count: 1
+  
+  PythonJwtLayer:
+    Type: AWS::Lambda::LayerVersion
+    DependsOn: WaitForLambdaLayerCodeBuild
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks:
+            - E3002
+    Properties:
+      CompatibleArchitectures: 
+        - x86_64
+      CompatibleRuntimes:
+        - python3.9
+      Content:
+        S3Bucket: !Ref LambdaLayerArtifactBucket
+        S3Key: layers/jwt.zip
+      Description: Lambda Layer with JWT dependencies
+      LayerName: pyton-jwt
+      LicenseInfo: MIT
+# -----------------------------------------------------------------------------
+# Outputs
+# -----------------------------------------------------------------------------

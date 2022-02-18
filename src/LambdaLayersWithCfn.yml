@@ -490,31 +490,40 @@ Resources:
       Timeout: 60
       Role: !GetAtt StartCodeBuildRole.Arn
 
-  # WaitHandle:
-  #   Type: AWS::CloudFormation::WaitConditionHandle
-
   StartLambdaLayerCodeBuild:  
     Type: Custom::StartLambdaLayerCodeBuild
     Properties:
       ServiceToken: !Sub '${StartCodeBuild.Arn}'
       ProjectName: !Ref LambdaLayerCodeBuildProject
-      WaitConditionLogicalResourceId: 'WaitCondition'
+      WaitConditionLogicalResourceId: 'WaitForLambdaLayerCodeBuild'
 
-  WaitCondition:
+  WaitForLambdaLayerCodeBuild:
     Type: AWS::CloudFormation::WaitCondition
     DependsOn: StartLambdaLayerCodeBuild
     CreationPolicy:
       ResourceSignal:
         Timeout: PT5M
         Count: 1
-
-  # WaitCondition:
-  #   Type: AWS::CloudFormation::WaitCondition
-  #   DependsOn: StartLambdaLayerCodeBuild
-  #   Properties:
-  #     Handle: !Ref WaitHandle
-  #     Timeout: 120
-
+  
+  PythonJwtLayer:
+    Type: AWS::Lambda::LayerVersion
+    DependsOn: WaitForLambdaLayerCodeBuild
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks:
+            - E3002
+    Properties:
+      CompatibleArchitectures: 
+        - x86_64
+      CompatibleRuntimes:
+        - python3.9
+      Content:
+        S3Bucket: !Ref LambdaLayerArtifactBucket
+        S3Key: layers/jwt.zip
+      Description: Lambda Layer with JWT dependencies
+      LayerName: pyton-jwt
+      LicenseInfo: MIT
 # -----------------------------------------------------------------------------
 # Outputs
 # -----------------------------------------------------------------------------

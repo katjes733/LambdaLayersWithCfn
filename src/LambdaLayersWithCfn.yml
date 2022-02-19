@@ -28,36 +28,52 @@ Description: Lambda Layers with CloudFormation Demonstration
 # -----------------------------------------------------------------------------
 Parameters:
   ResourcePrefix:
-    Description: The prefix for all resources
+    Description: The (optional) prefix for all resources. Useful to identify resources for a common use case.
     Type: String
-    Default: ''
     AllowedPattern: ^$|^[a-z0-9-]{0,7}$
   ArtifactBucketName:
     Description: Layer Artifact Bucket Name
     Type: String
     Default: 'layer-artifacts'
-
+  Runtime:
+    Description: The runtime for the lambda layer
+    Type: String
+    AllowedValues:
+      - python 3.9
+      - nodejs 14.x
+  Architecture:
+    Description: The architecture for the lambda layer
+    Type: String
+    AllowedValues:
+      - x86_64
+      - arm64
+      - All
+  Requirements:
+    Description: Comma separated string containing all requirements
+    Type: String
+  ZipFilename:
+    Description: The name of the lambda layer zip file
+    Type: String
+  GitFiles:
+    Description: Json Array with git URLs and file filter from the repository to be copied into lambda layer
+    Type: String
+    AllowedPattern: ^$|^\[\]$|^\[\{\"url\":\s*\"https:\/\/.*\",\s*\"files\":\s*\".*\"\}\]$
 # -----------------------------------------------------------------------------
 # Conditions
 # -----------------------------------------------------------------------------
 Conditions:
   IsArmSupportedRegion: !Or [!Equals ['us-east-1', !Ref AWS::Region], !Equals ['us-west-2', !Ref AWS::Region], !Equals ['eu-central-1', !Ref AWS::Region], !Equals ['eu-west-1', !Ref AWS::Region], !Equals ['ap-south-1', !Ref AWS::Region], !Equals ['ap-southeast-1', !Ref AWS::Region], !Equals ['ap-southeast-2', !Ref AWS::Region], !Equals ['ap-northeast-1', !Ref AWS::Region]]
+  IsAllArchitectures: !Equals [!Ref Architecture, "All"]
+  IsGitFilesEmpty: !Equals [!Ref GitFiles, ""]
 # -----------------------------------------------------------------------------
 # Mappings
 # -----------------------------------------------------------------------------
-Mappings:
-  # First line must be indented by 8, every line following with 14.
-  # This is due to the code being inserted into the buildspec.yml with 6 indents  
-  Code:
-    Python:      
-      Requirements: |
-        pyjwt[crypto]
 
 # -----------------------------------------------------------------------------
 # Resources
 # -----------------------------------------------------------------------------
 Resources:
-  KmsKey:
+  LambdaLayerKmsKey:
     Type: AWS::KMS::Key
     Metadata:
       cfn_nag:
@@ -69,7 +85,7 @@ Resources:
       EnableKeyRotation: true
       KeyPolicy:
         Version: 2012-10-17
-        Id: !Ref AWS::StackName
+        Id: !Sub '${ResourcePrefix}LambdaLayerKmsKey-${AWS::Region}'
         Statement:
           - Sid: Allows admin of the key
             Effect: Allow
@@ -103,11 +119,11 @@ Resources:
               StringLike:
                 kms:CallerAccount: !Sub ${AWS::AccountId}
 
-  KmsKeyAlias:
+  LambdaLayerKmsKeyAlias:
     Type: AWS::KMS::Alias
     Properties:
-      AliasName: !Sub 'alias/${ResourcePrefix}${ArtifactBucketName}-${AWS::AccountId}-${AWS::Region}'
-      TargetKeyId: !Ref KmsKey
+      AliasName: !Sub 'alias/${ResourcePrefix}LambdaLayerKmsKeyAlias-${AWS::AccountId}-${AWS::Region}'
+      TargetKeyId: !Ref LambdaLayerKmsKey
 
   # -----------------------------------------------------------------------------
   # Lambda to empty buckets
@@ -231,7 +247,7 @@ Resources:
         ServerSideEncryptionConfiguration:
         - ServerSideEncryptionByDefault:
             SSEAlgorithm: aws:kms
-            KMSMasterKeyID: !GetAtt KmsKey.Arn
+            KMSMasterKeyID: !GetAtt LambdaLayerKmsKey.Arn
       VersioningConfiguration:
         Status: Enabled
       LifecycleConfiguration:
@@ -242,8 +258,8 @@ Resources:
             TransitionInDays: 90
           Status: Enabled  
 
-  EmptyLayerArtifactBucket:  
-    Type: Custom::EmptyLayerArtifactBucket
+  EmptyLambdaLayerArtifactBucket:  
+    Type: Custom::EmptyLambdaLayerArtifactBucket
     Properties:
       ServiceToken: !Sub '${EmptyBucket.Arn}'
       BucketName: !Ref LambdaLayerArtifactBucket
@@ -323,11 +339,11 @@ Resources:
         Type: S3
         Location: !Sub '${ResourcePrefix}${ArtifactBucketName}-${AWS::AccountId}-${AWS::Region}'
       Description: Build project to prepare the CFN template configuration
-      EncryptionKey: !GetAtt KmsKey.Arn
+      EncryptionKey: !GetAtt LambdaLayerKmsKey.Arn
       ServiceRole: !GetAtt LambdaLayerCodeBuildProjectRole.Arn
       Artifacts:
         Location: !Sub '${ResourcePrefix}${ArtifactBucketName}-${AWS::AccountId}-${AWS::Region}'
-        Name: jwt.zip
+        Name: !Ref ZipFilename
         Packaging: ZIP
         Path: layers
         Type: S3
@@ -347,7 +363,10 @@ Resources:
             Value: !Ref LambdaLayerArtifactBucket
           - Name: KMS_KEY_ARN
             Type: PLAINTEXT
-            Value: !GetAtt KmsKey.Arn
+            Value: !GetAtt LambdaLayerKmsKey.Arn
+          - Name: GIT_FILES
+            Type: PLAINTEXT
+            Value: !If [IsGitFilesEmpty, '[]', !Ref GitFiles]
       Source:
         Type: NO_SOURCE
         BuildSpec: !Sub 
@@ -356,20 +375,41 @@ Resources:
             phases:
               install:
                 runtime-versions:
-                  python: 3.9
+                  ${Language}: ${LanguageVersion}
               build:
                 commands: |
-                  cat <<EOT >> requirements.txt
-                  ${Requirements}
-                  EOT
+                  echo Create ${Language} specific requirements file
+                  if [[ "${Language}" == "python" ]]; then
+                    reqfile=requirements.txt
+                  elif [[ "${Language}" == "nodejs" ]]; then
+                    reqfile=package.json
+                  fi
+                  reqs=${Requirements}
+                  IFS=','
+                  read -a reqarr <<< "$reqs"
+                  rm -f $reqfile
+                  for val in "${!reqarr[@]}";
+                  do
+                    echo "$val" >> $reqfile
+                  done
                   echo Create target folder
-                  mkdir -p "python"
-                  echo Install requirements.txt
-                  python -m pip install -r requirements.txt -t "python"
-                  echo Getting required git repo
-                  git clone https://github.com/OfficeDev/outlook-actionable-messages-python-token-validation.git jwtvalidation
-                  echo Copy specific files to folder python
-                  cp ./jwtvalidation/openid.py ./python
+                  mkdir -p "${Language}"
+                  echo Install $reqfile
+                  if [[ "${Language}" == "python" ]]; then                    
+                    python -m pip install -r $reqfile -t "${Language}"
+                  elif [[ "${Language}" == "nodejs" ]]; then
+                    echo ${Language} not yet supported
+                  fi
+                  jq -c '.[]' <<< "$GIT_FILES" | while read item; do
+                    url=$(jq -r '.url' <<< "$item")
+                    files=$(jq -r '.files' <<< "$item")
+                    path=${!url##*/}
+                    path=${!path%.*}
+                    echo "Cloning git repo $url"
+                    git clone $url
+                    echo "Copying ./$path/$files to ./${Language}"
+                    cp ./$path/$files ./${Language}
+                  done
               post_build:
                 commands: |                 
                   echo Build completed on `date`
@@ -386,9 +426,10 @@ Resources:
                   fi
             artifacts:
               files:
-                - 'python/**/*'
+                - '${Language}/**/*'
               discard-paths: no
-          - Requirements: !FindInMap [ Code, Python, Requirements ] 
+          - Language: !Select [0, !Split [" ", !Ref Runtime]]
+            LanguageVersion: !Select [1, !Split [" ", !Ref Runtime]]
       TimeoutInMinutes: 5
 
   # -----------------------------------------------------------------------------
@@ -490,6 +531,9 @@ Resources:
       Timeout: 60
       Role: !GetAtt StartCodeBuildRole.Arn
 
+  # -----------------------------------------------------------------------------
+  # Trigger Lambda Layer zip file build and wait
+  # -----------------------------------------------------------------------------
   StartLambdaLayerCodeBuild:  
     Type: Custom::StartLambdaLayerCodeBuild
     Properties:
@@ -505,7 +549,10 @@ Resources:
         Timeout: PT5M
         Count: 1
   
-  PythonJwtLayer:
+  # -----------------------------------------------------------------------------
+  # Create Lambda Layer based on the built zip file
+  # -----------------------------------------------------------------------------
+  LambdaLayer:
     Type: AWS::Lambda::LayerVersion
     DependsOn: WaitForLambdaLayerCodeBuild
     Metadata:
@@ -515,15 +562,20 @@ Resources:
             - E3002
     Properties:
       CompatibleArchitectures: 
-        - x86_64
+        - !If
+          - IsAllArchitectures
+          - - x86_64
+            - arm64
+          - !Ref Architecture
       CompatibleRuntimes:
-        - python3.9
+        - !Join ["", !Split [" ", !Ref Runtime]]
       Content:
         S3Bucket: !Ref LambdaLayerArtifactBucket
-        S3Key: layers/jwt.zip
+        S3Key: !Sub 'layers/${ZipFilename}'
       Description: Lambda Layer with JWT dependencies
       LayerName: pyton-jwt
       LicenseInfo: MIT
+
 # -----------------------------------------------------------------------------
 # Outputs
 # -----------------------------------------------------------------------------

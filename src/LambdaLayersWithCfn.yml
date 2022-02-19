@@ -29,42 +29,124 @@ Description: Lambda Layers with CloudFormation Demonstration
 Parameters:
   ResourcePrefix:
     Description: The (optional) prefix for all resources. Useful to identify resources for a common use case.
+    ConstraintDescription: Must be a valid prefix with no more than 7 lowercase characters, numbers or dashes
     Type: String
+    Default: 'w-pasx-'
     AllowedPattern: ^$|^[a-z0-9-]{0,7}$
   ArtifactBucketName:
     Description: Layer Artifact Bucket Name
+    ConstraintDescription: Must be a valid bucket name without a resource prefix and no more than 23 lowercase characters, numbers or dashes
     Type: String
     Default: 'layer-artifacts'
-  Runtime:
+    AllowedPattern: ^[a-z0-9-]*$
+  LayerRuntime:
     Description: The runtime for the lambda layer
+    ConstraintDescription: Must be a valid selection
     Type: String
+    Default: python 3.9
     AllowedValues:
       - python 3.9
       - nodejs 14.x
-  Architecture:
+  LayerArchitecture:
     Description: The architecture for the lambda layer
+    ConstraintDescription: Must be a valid selection
     Type: String
+    Default: x86_64
     AllowedValues:
       - x86_64
       - arm64
       - All
   Requirements:
     Description: Comma separated string containing all requirements
+    ConstraintDescription: Must be a comma separated string with requirements and optionally their version
     Type: String
+    Default: "pyjwt[crypto]"
+    AllowedPattern: ^[a-zA-Z0-9-_\[\]]*(\=\=[a-zA-Z0-9\.-]*)?(,[a-zA-Z0-9-_\[\]]*(\=\=[a-zA-Z0-9\.-]*)?)*$
   ZipFilename:
-    Description: The name of the lambda layer zip file
+    Description: The name of the lambda layer zip file (used internally only)
+    ConstraintDescription: Must be a valid filename with extension ending on .zip
     Type: String
+    Default: "jwt.zip"
+    AllowedPattern: ^[a-zA-Z0-9]{1}[a-zA-Z0-9-_]*\.zip$
   GitFiles:
     Description: Json Array with git URLs and file filter from the repository to be copied into lambda layer
+    ConstraintDescription: Must be a valid json array string with objects containing url and files
     Type: String
+    Default: '[{"url": "https://github.com/OfficeDev/outlook-actionable-messages-python-token-validation.git", "files": "openid.py"}]'
     AllowedPattern: ^$|^\[\]$|^\[\{\"url\":\s*\"https:\/\/.*\",\s*\"files\":\s*\".*\"\}\]$
+  LayerName:
+    Description: Name for the custom lambda layer
+    ConstraintDescription: Must be a lambda layer name and not empty
+    Type: String
+    Default: "python-jwt"
+    AllowedPattern: ^[a-zA-Z0-9-_]+$
+  LayerDescription:
+    Description: Description for the custom lambda layer or empty for default description
+    Type: String
+    Default: "Lambda Layer with JWT dependencies"
+  LayerLicenseInfo:
+    Description: The layer's software license.
+    ConstraintDescription: An SPDX license identifier, an URL or the full text of the license. Can be empty.
+    Type: String
+    Default: "MIT"
+
+# -----------------------------------------------------------------------------
+# Metadata:
+# -----------------------------------------------------------------------------
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Layer General Settings
+        Parameters:
+          - LayerName
+          - LayerDescription
+          - LayerLicenseInfo
+          - LayerRuntime
+          - LayerArchitecture
+      - Label:
+          default: Layer Assembly Settings
+        Parameters:
+          - Requirements
+          - GitFiles
+      - Label:
+          default: Resource General Settings
+        Parameters:
+          - ResourcePrefix
+          - ArtifactBucketName
+          - ZipFilename
+    ParameterLabels:
+      LayerName:
+        default: Layer Name
+      LayerDescription:
+        default: Layer Description
+      LayerLicenseInfo:
+        default: Layer License Information
+      LayerRuntime:
+        default: Layer Runtime
+      LayerArchitecture:
+        default: Layer Architecture
+      Requirements:
+        default: Requirements
+      GitFiles:
+        default: Git Files
+      ResourcePrefix:
+        default: Resource Prefix
+      ArtifactBucketName:
+        default: Assembly Output Bucket Name
+      ZipFilename:
+        default: Internal Zip Filename
+
+
 # -----------------------------------------------------------------------------
 # Conditions
 # -----------------------------------------------------------------------------
 Conditions:
   IsArmSupportedRegion: !Or [!Equals ['us-east-1', !Ref AWS::Region], !Equals ['us-west-2', !Ref AWS::Region], !Equals ['eu-central-1', !Ref AWS::Region], !Equals ['eu-west-1', !Ref AWS::Region], !Equals ['ap-south-1', !Ref AWS::Region], !Equals ['ap-southeast-1', !Ref AWS::Region], !Equals ['ap-southeast-2', !Ref AWS::Region], !Equals ['ap-northeast-1', !Ref AWS::Region]]
-  IsAllArchitectures: !Equals [!Ref Architecture, "All"]
+  IsAllLayerArchitectures: !Equals [!Ref LayerArchitecture, "All"]
   IsGitFilesEmpty: !Equals [!Ref GitFiles, ""]
+  IsLayerDescriptionEmpty: !Equals [!Ref LayerDescription, ""]
+
 # -----------------------------------------------------------------------------
 # Mappings
 # -----------------------------------------------------------------------------
@@ -428,8 +510,8 @@ Resources:
               files:
                 - '${Language}/**/*'
               discard-paths: no
-          - Language: !Select [0, !Split [" ", !Ref Runtime]]
-            LanguageVersion: !Select [1, !Split [" ", !Ref Runtime]]
+          - Language: !Select [0, !Split [" ", !Ref LayerRuntime]]
+            LanguageVersion: !Select [1, !Split [" ", !Ref LayerRuntime]]
       TimeoutInMinutes: 5
 
   # -----------------------------------------------------------------------------
@@ -563,18 +645,18 @@ Resources:
     Properties:
       CompatibleArchitectures: 
         - !If
-          - IsAllArchitectures
+          - IsAllLayerArchitectures
           - - x86_64
             - arm64
-          - !Ref Architecture
+          - !Ref LayerArchitecture
       CompatibleRuntimes:
-        - !Join ["", !Split [" ", !Ref Runtime]]
+        - !Join ["", !Split [" ", !Ref LayerRuntime]]
       Content:
         S3Bucket: !Ref LambdaLayerArtifactBucket
         S3Key: !Sub 'layers/${ZipFilename}'
-      Description: Lambda Layer with JWT dependencies
-      LayerName: pyton-jwt
-      LicenseInfo: MIT
+      Description: !If [IsLayerDescriptionEmpty, !Sub "Custom Lambda Layer ${LayerName}", !Ref LayerDescription]
+      LayerName: !Ref LayerName
+      LicenseInfo: !Ref LayerLicenseInfo
 
 # -----------------------------------------------------------------------------
 # Outputs

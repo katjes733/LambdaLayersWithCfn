@@ -31,7 +31,6 @@ Parameters:
     Description: The (optional) prefix for all resources. Useful to identify resources for a common use case.
     ConstraintDescription: Must be a valid prefix with no more than 7 lowercase characters, numbers or dashes
     Type: String
-    Default: 'w-pasx-'
     AllowedPattern: ^$|^[a-z0-9-]{0,7}$
   ArtifactBucketName:
     Description: Layer Artifact Bucket Name
@@ -43,7 +42,6 @@ Parameters:
     Description: The runtime for the lambda layer
     ConstraintDescription: Must be a valid selection
     Type: String
-    Default: python 3.9
     AllowedValues:
       - python 3.9
       - nodejs 14.x
@@ -51,7 +49,6 @@ Parameters:
     Description: The architecture for the lambda layer
     ConstraintDescription: Must be a valid selection
     Type: String
-    Default: x86_64
     AllowedValues:
       - x86_64
       - arm64
@@ -60,35 +57,29 @@ Parameters:
     Description: Comma separated string containing all requirements
     ConstraintDescription: Must be a comma separated string with requirements and optionally their version
     Type: String
-    Default: "pyjwt[crypto]"
     AllowedPattern: ^[a-zA-Z0-9-_\[\]]*(\=\=[a-zA-Z0-9\.-]*)?(,[a-zA-Z0-9-_\[\]]*(\=\=[a-zA-Z0-9\.-]*)?)*$
   ZipFilename:
     Description: The name of the lambda layer zip file (used internally only)
     ConstraintDescription: Must be a valid filename with extension ending on .zip
     Type: String
-    Default: "jwt.zip"
     AllowedPattern: ^[a-zA-Z0-9]{1}[a-zA-Z0-9-_]*\.zip$
   GitFiles:
     Description: Json Array with git URLs and file filter from the repository to be copied into lambda layer
     ConstraintDescription: Must be a valid json array string with objects containing url and files
     Type: String
-    Default: '[{"url": "https://github.com/OfficeDev/outlook-actionable-messages-python-token-validation.git", "files": "openid.py"}]'
     AllowedPattern: ^$|^\[\]$|^\[\{\"url\":\s*\"https:\/\/.*\",\s*\"files\":\s*\".*\"\}\]$
   LayerName:
     Description: Name for the custom lambda layer
     ConstraintDescription: Must be a lambda layer name and not empty
     Type: String
-    Default: "python-jwt"
     AllowedPattern: ^[a-zA-Z0-9-_]+$
   LayerDescription:
     Description: Description for the custom lambda layer or empty for default description
     Type: String
-    Default: "Lambda Layer with JWT dependencies"
   LayerLicenseInfo:
     Description: The layer's software license.
     ConstraintDescription: An SPDX license identifier, an URL or the full text of the license. Can be empty.
     Type: String
-    Default: "MIT"
 
 # -----------------------------------------------------------------------------
 # Metadata:
@@ -424,11 +415,7 @@ Resources:
       EncryptionKey: !GetAtt LambdaLayerKmsKey.Arn
       ServiceRole: !GetAtt LambdaLayerCodeBuildProjectRole.Arn
       Artifacts:
-        Location: !Sub '${ResourcePrefix}${ArtifactBucketName}-${AWS::AccountId}-${AWS::Region}'
-        Name: !Ref ZipFilename
-        Packaging: ZIP
-        Path: layers
-        Type: S3
+        Type: NO_ARTIFACTS 
       Environment:
         Type:        LINUX_CONTAINER
         Image:       aws/codebuild/amazonlinux2-x86_64-standard:3.0
@@ -449,6 +436,9 @@ Resources:
           - Name: GIT_FILES
             Type: PLAINTEXT
             Value: !If [IsGitFilesEmpty, '[]', !Ref GitFiles]
+          - Name: ZIP_FILE_NAME
+            Type: PLAINTEXT
+            Value: !Ref ZipFilename
       Source:
         Type: NO_SOURCE
         BuildSpec: !Sub 
@@ -492,8 +482,11 @@ Resources:
                     echo "Copying ./$path/$files to ./${Language}"
                     cp ./$path/$files ./${Language}
                   done
+                  zip -r $ZIP_FILE_NAME ./${Language}
               post_build:
-                commands: |                 
+                commands: |
+                  echo Copy $ZIP_FILE_NAME to s3://$TARGET_ARTIFACT_BUCKET/layers
+                  aws s3 cp $ZIP_FILE_NAME s3://$TARGET_ARTIFACT_BUCKET/layers/$ZIP_FILE_NAME --sse aws:kms --sse-kms-key-id $KMS_KEY_ARN
                   echo Build completed on `date`
                   TIMESTAMP=$(date +%s%N)
                   if [[ "$STACK_NAME" != "none" ]]; then
@@ -506,10 +499,6 @@ Resources:
                   else 
                     echo "Not called from CloudFormation" 
                   fi
-            artifacts:
-              files:
-                - '${Language}/**/*'
-              discard-paths: no
           - Language: !Select [0, !Split [" ", !Ref LayerRuntime]]
             LanguageVersion: !Select [1, !Split [" ", !Ref LayerRuntime]]
       TimeoutInMinutes: 5
